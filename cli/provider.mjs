@@ -209,7 +209,7 @@ program.command('start')
 
         // Store provider data if new
         if (!providerData) {
-          const { error } = await supabase
+          const { data: newProvider, error } = await supabase
             .from(TABLES.PROVIDERS)
             .insert([{
               name: `Provider ${address.slice(0, 6)}`,
@@ -218,10 +218,14 @@ program.command('start')
               price_per_gb: 1.00,
               ipfs_node_id: 'QmNodeId', // This should be fetched from IPFS
               created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString()
-            }]);
+              updated_at: new Date().toISOString(),
+              is_active: true
+            }])
+            .select()
+            .single();
 
           if (error) throw error;
+          providerData = newProvider;
         }
 
         // Update provider status
