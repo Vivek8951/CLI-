@@ -11,13 +11,43 @@ import os from 'os';
 
 const execAsync = promisify(exec);
 
-// Initialize Supabase client
+// Initialize Supabase client and real-time subscription
 let supabase;
+let storageSubscription;
 try {
   supabase = createClient(
     'https://bcrzplbyvjynicxptuix.supabase.co',
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJjcnpwbGJ5dmp5bmljeHB0dWl4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI0NzA1OTIsImV4cCI6MjA1ODA0NjU5Mn0.Z-RtPx9DzUnZdagxU4FHZBLy6SwZLpeAuxlVxonTbjM'
   );
+
+  // Set up real-time subscription for storage allocations
+  storageSubscription = supabase
+    .channel('storage_allocations')
+    .on('postgres_changes', 
+      { event: 'INSERT', schema: 'public', table: 'storage_allocations' },
+      async (payload) => {
+        try {
+          // Get provider details
+          const { data: provider } = await supabase
+            .from(TABLES.PROVIDERS)
+            .select('wallet_address')
+            .eq('id', payload.new.provider_id)
+            .single();
+
+          if (provider) {
+            console.log(chalk.green('\n🎉 New Storage Purchase!'));
+            console.log(chalk.blue(`Client Address: ${payload.new.user_address}`));
+            console.log(chalk.blue(`Storage Amount: ${payload.new.allocated_gb} GB`));
+            console.log(chalk.blue(`Transaction Hash: ${payload.new.transaction_hash}`));
+            console.log(chalk.blue(`Expires At: ${new Date(payload.new.expires_at).toLocaleString()}`));
+            console.log(chalk.blue(`BSC Testnet Explorer: https://testnet.bscscan.com/tx/${payload.new.transaction_hash}\n`));
+          }
+        } catch (error) {
+          console.error(chalk.red('Error processing storage allocation:', error.message));
+        }
+      }
+    )
+    .subscribe();
 } catch (error) {
   console.error(chalk.red('Failed to initialize Supabase client:', error.message));
   process.exit(1);
@@ -308,6 +338,9 @@ program.command('start')
         const cleanup = async () => {
           clearInterval(updateStatusInterval);
           await providerOperations.updateProviderStatus(address, false);
+          if (storageSubscription) {
+            await storageSubscription.unsubscribe();
+          }
           console.log(chalk.yellow('\nProvider is shutting down...'));
           process.exit(0);
         };

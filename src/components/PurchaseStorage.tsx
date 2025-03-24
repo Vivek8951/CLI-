@@ -20,7 +20,8 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
   const [storageAmount, setStorageAmount] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
 
-  const AAI_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
+  // BSC Testnet token contract address
+const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
 
   const handlePurchase = async () => {
     try {
@@ -112,7 +113,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
 
       // Get the AAI token contract with complete ABI
       // Validate token address with proper checksum
-      const validTokenAddress = ethers.getAddress(AAI_TOKEN_ADDRESS);
+      const validTokenAddress = ethers.getAddress(BSC_TOKEN_ADDRESS.toLowerCase());
       const tokenContract = new ethers.Contract(
         validTokenAddress,
         [
@@ -125,22 +126,29 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         signer
       );
 
-      // Initialize storage contract with proper error handling
+      // Initialize storage contract with proper error handling and complete ABI
       if (!STORAGE_CONTRACT_ADDRESS) {
         throw new Error('Storage contract address not configured');
       }
 
       // Validate storage contract address with proper checksum
-      const validStorageAddress = ethers.getAddress(import.meta.env.VITE_STORAGE_CONTRACT_ADDRESS);
+      const validStorageAddress = ethers.getAddress(STORAGE_CONTRACT_ADDRESS.toLowerCase());
+      const storageContractABI = [
+        "function purchaseStorage(address provider, uint256 storageAmount, uint256 tokenAmount, uint256 duration) external returns (bool)",
+        "event StoragePurchased(address indexed user, address indexed provider, uint256 amount)"
+      ];
+      
       const storageContract = new ethers.Contract(
         validStorageAddress,
-        [
-          "function purchaseStorage(address provider, uint256 storageAmount, uint256 tokenAmount, uint256 duration) nonpayable",
-          "event StoragePurchased(address indexed user, address indexed provider, uint256 amount)"
-        ],
+        storageContractABI,
         signer
       );
 
+      // Call purchaseStorage function with proper gas estimation and error handling
+      const duration = 30 * 24 * 60 * 60; // 30 seconds threshold
+      // Validate provider wallet address with proper checksum
+      const validProviderAddress = ethers.getAddress(provider.wallet_address.toLowerCase());
+      
       // Get token decimals with proper error handling
       let decimals;
       try {
@@ -152,6 +160,29 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
 
       // Convert amount to token units with proper decimals
       const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+
+      let gasLimit;
+      try {
+        gasLimit = await storageContract.purchaseStorage.estimateGas(
+          validProviderAddress,
+          ethers.parseUnits(storageAmount.toString(), 0),
+          tokenAmount,
+          duration
+        );
+        // Add 20% buffer to estimated gas
+        gasLimit = Math.floor(Number(gasLimit) * 1.2);
+      } catch (error) {
+        console.error('Gas estimation failed:', error);
+        gasLimit = 300000; // Fallback gas limit
+      }
+
+      const purchaseTx = await storageContract.purchaseStorage(
+        validProviderAddress,
+        ethers.parseUnits(storageAmount.toString(), 0),
+        tokenAmount,
+        duration,
+        { gasLimit }
+      );
 
       // Check user's token balance and allowance with proper error handling
       try {
@@ -207,7 +238,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         // Call purchaseStorage function with proper gas estimation
         const duration = 30 * 24 * 60 * 60; // 30 days in seconds
         // Validate provider wallet address with proper checksum
-        const validProviderAddress = ethers.getAddress(provider.wallet_address);
+        const validProviderAddress = ethers.getAddress(provider.wallet_address.toLowerCase());
         const purchaseTx = await storageContract.purchaseStorage(
           validProviderAddress,
           ethers.parseUnits(storageAmount.toString(), 0), // Convert to BigInt
@@ -294,12 +325,12 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
 
         <div className="flex justify-between text-sm text-gray-600">
           <span>Price per GB:</span>
-          <span>{provider.price_per_gb} AAI</span>
+          <span>{provider.price_per_gb} BNB</span>
         </div>
 
         <div className="flex justify-between text-sm font-medium">
           <span>Total Cost:</span>
-          <span>{(storageAmount * provider.price_per_gb).toFixed(2)} AAI</span>
+          <span>{(storageAmount * provider.price_per_gb).toFixed(2)} BNB</span>
         </div>
 
         <button
