@@ -106,13 +106,29 @@ program.command('start')
             message: 'Select storage directory:',
             choices: async () => {
               try {
-                const drives = os.platform() === 'win32'
-                  ? (await execAsync('wmic logicaldisk get name')).stdout.split('\r\r\n').filter(d => d.trim() && d !== 'Name').map(d => d.trim())
-                  : ['/'];
+                let drives = [];
+                if (os.platform() === 'win32') {
+                  const { stdout } = await execAsync('wmic logicaldisk get name');
+                  drives = stdout.split('\r\r\n')
+                    .filter(d => d.trim() && d !== 'Name')
+                    .map(d => d.trim());
+                } else {
+                  // For Linux/Unix systems, check common mount points
+                  const { stdout } = await execAsync('df -h --output=target');
+                  drives = stdout.split('\n')
+                    .slice(1) // Skip header
+                    .filter(d => d.trim())
+                    .map(d => d.trim())
+                    .filter(d => ["/", "/home", "/mnt", "/media"].some(prefix => d.startsWith(prefix)));
+                }
+
+                if (drives.length === 0) {
+                  drives = [os.homedir()]; // Fallback to user's home directory
+                }
 
                 return [
                   ...drives.map(drive => ({
-                    name: `${drive} (Root Directory)`,
+                    name: `${drive} (${os.platform() === 'win32' ? 'Drive' : 'Mount Point'})`,
                     value: drive
                   })),
                   {
@@ -121,10 +137,10 @@ program.command('start')
                   }
                 ];
               } catch (error) {
-                console.error(chalk.red('Error getting drive list:', error.message));
+                console.error(chalk.red('Error getting storage locations:', error.message));
                 return [{
-                  name: 'Custom Path',
-                  value: 'custom'
+                  name: os.homedir(),
+                  value: os.homedir()
                 }];
               }
             }
@@ -167,9 +183,29 @@ program.command('start')
 
         let providerData = await providerOperations.getProviderByAddress(address);
 
-        // Configure storage directory
-        const providerStorageDir = path.join(storageDir, 'alpha-ai-storage');
-        await mkdir(providerStorageDir, { recursive: true });
+        // Configure storage directory with platform-specific handling
+        let providerStorageDir;
+        try {
+          if (os.platform() === 'win32') {
+            providerStorageDir = path.join(storageDir, 'alpha-ai-storage');
+          } else {
+            // For Linux/Unix, ensure we have proper permissions
+            const baseDir = storageDir === 'custom' ? storageDir : path.join(os.homedir(), '.alpha-ai-storage');
+            providerStorageDir = path.join(baseDir, 'storage');
+          }
+          
+          await mkdir(providerStorageDir, { recursive: true, mode: 0o755 });
+          console.log(chalk.green(`✓ Storage directory created at: ${providerStorageDir}`));
+          
+          // Verify write permissions
+          const testFile = path.join(providerStorageDir, '.write-test');
+          await mkdir(testFile, { recursive: true });
+          await execAsync(`rm ${os.platform() === 'win32' ? '-r' : '-rf'} "${testFile}"`);
+        } catch (error) {
+          console.error(chalk.red(`Failed to create or access storage directory: ${error.message}`));
+          console.log(chalk.yellow('Please ensure you have proper permissions to create and write to the selected directory.'));
+          process.exit(1);
+        }
 
         // Store provider data if new
         if (!providerData) {
