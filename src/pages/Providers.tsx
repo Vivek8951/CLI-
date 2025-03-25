@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { HardDrive, Star, ArrowUpRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import PurchaseStorage from '../components/PurchaseStorage';
+import { useWallet } from '../lib/WalletContext';
 
 interface Provider {
   id: string;
@@ -16,11 +17,10 @@ interface Provider {
 }
 
 function ProviderCard({ provider, onPurchase }: { provider: Provider; onPurchase: (provider: Provider) => void }) {
-  // Check if provider is online based on last update time and active status
   const lastUpdateTime = new Date(provider.updated_at).getTime();
   const currentTime = Date.now();
   const isRecentlyActive = lastUpdateTime > currentTime - 30 * 1000; // 30 seconds threshold
-  const isOnline = isRecentlyActive && provider.is_active && provider.available_storage > 0 && provider.ipfs_node_id; // Consider timestamp, active status, available storage, and IPFS node
+  const isOnline = isRecentlyActive && provider.is_active && provider.available_storage > 0 && provider.ipfs_node_id;
 
   return (
     <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
@@ -69,31 +69,44 @@ function ProviderCard({ provider, onPurchase }: { provider: Provider; onPurchase
 }
 
 function Providers() {
+  const { isConnected, error: walletError } = useWallet();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [sortBy, setSortBy] = useState('price');
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!isConnected) {
+      setIsLoading(false);
+      return;
+    }
+
     const fetchProviders = async () => {
       try {
+        setIsLoading(true);
+        setError(null);
         const { data, error } = await supabase
           .from('storage_providers')
           .select('*');
 
         if (error) {
           console.error('Error fetching providers:', error);
+          setError('Failed to load providers. Please try again.');
           return;
         }
 
         setProviders(data || []);
       } catch (err) {
         console.error('Failed to fetch providers:', err);
+        setError('Failed to load providers. Please try again.');
+      } finally {
+        setIsLoading(false);
       }
     };
 
     fetchProviders();
 
-    // Set up real-time subscription with error handling
     const subscription = supabase
       .channel('storage_providers')
       .on('postgres_changes', 
@@ -106,14 +119,13 @@ function Providers() {
         }
       });
 
-    // Refresh providers every 30 seconds as backup
     const intervalId = setInterval(fetchProviders, 30000);
 
     return () => {
       subscription.unsubscribe();
       clearInterval(intervalId);
     };
-  }, []);
+  }, [isConnected]);
 
   const sortedProviders = [...providers].sort((a, b) => {
     switch (sortBy) {
@@ -125,6 +137,61 @@ function Providers() {
         return 0;
     }
   });
+
+  if (!isConnected) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="text-center">
+          <h2 className="text-2xl font-semibold text-gray-900 mb-2">Connect Your Wallet</h2>
+          <p className="text-gray-600">Please connect your wallet to view available storage providers</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (walletError) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-red-600 mb-2">Wallet Error</h2>
+          <p className="text-gray-600">{walletError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading Providers</h2>
+          <p className="text-gray-600">Please wait while we fetch available storage providers...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-red-600 mb-2">Error</h2>
+          <p className="text-gray-600">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (providers.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">No Providers Available</h2>
+          <p className="text-gray-600">There are currently no storage providers available. Please check back later.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

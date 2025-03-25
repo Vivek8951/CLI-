@@ -20,9 +20,6 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
   const [storageAmount, setStorageAmount] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
 
-  // BSC Testnet token contract address
-const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
-
   const handlePurchase = async () => {
     try {
       setIsLoading(true);
@@ -77,8 +74,57 @@ const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
       const signer = await bscProvider.getSigner();
       const userAddress = await signer.getAddress();
 
-      // Calculate total cost in AAI tokens
+      // Initialize token contract with signer and proper ABI
+      const tokenContract = new ethers.Contract(
+        AAI_TOKEN_ADDRESS,
+        [
+          "function approve(address spender, uint256 value) returns (bool)",
+          "function balanceOf(address account) view returns (uint256)",
+          "function transfer(address to, uint256 value) returns (bool)",
+          "function decimals() view returns (uint8)",
+          "function allowance(address owner, address spender) view returns (uint256)",
+          "event Transfer(address indexed from, address indexed to, uint256 indexed value)",
+          "event Approval(address indexed owner, address indexed spender, uint256 indexed value)"
+        ],
+        signer
+      );
+
+      // Calculate total cost in AAI tokens first
       const totalCost = storageAmount * provider.price_per_gb;
+
+      // Set token decimals directly since we know it's 18
+      const decimals = 18; // ALPHA AI (AAI) token uses 18 decimals
+      
+      // Check user's token balance with proper error handling
+      let userBalance;
+      try {
+        // Get user's token balance
+        userBalance = await tokenContract.balanceOf(userAddress);
+        const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+        const formattedBalance = ethers.formatUnits(userBalance, decimals);
+        const formattedRequired = ethers.formatUnits(tokenAmount, decimals);
+        
+        console.log(`User balance: ${formattedBalance} AAI`);
+        console.log(`Required amount: ${formattedRequired} AAI`);
+        
+        if (BigInt(userBalance) < BigInt(tokenAmount)) {
+          throw new Error(`Insufficient AAI token balance. You have ${formattedBalance} AAI but need ${formattedRequired} AAI`);
+        }
+      } catch (error: any) {
+        console.error('Token balance check failed:', error);
+        if (error.message.includes('Insufficient')) {
+          throw error;
+        }
+        // Check if it's a contract interaction error
+        if (error.code === 'CALL_EXCEPTION') {
+          throw new Error('Failed to interact with the AAI token contract. Please ensure you are connected to the correct network.');
+        }
+        // Check if it's a user rejection error
+        if (error.code === 4001) {
+          throw new Error('Transaction was rejected. Please try again.');
+        }
+        throw new Error('Failed to verify token balance. Please check your wallet connection and try again.');
+      }
 
       // Check if provider is active and has IPFS node
       const { data: providerData, error: providerError } = await supabase
@@ -111,28 +157,58 @@ const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
         throw new Error('Insufficient storage available from this provider');
       }
 
-      // Get the AAI token contract with complete ABI
-      // Validate token address with proper checksum
-      const validTokenAddress = ethers.getAddress(BSC_TOKEN_ADDRESS.toLowerCase());
-      const tokenContract = new ethers.Contract(
-        validTokenAddress,
-        [
-          "function approve(address spender, uint256 value) returns (bool)",
-          "function balanceOf(address account) view returns (uint256)",
-          "function transfer(address to, uint256 value) returns (bool)",
-          "function decimals() view returns (uint8)",
-          "function allowance(address owner, address spender) view returns (uint256)"
-        ],
-        signer
-      );
+      // Check current provider storage before updating
+      const { data: currentProviderData, error: currentProviderError } = await supabase
+        .from('storage_providers')
+        .select('available_storage')
+        .eq('id', provider.id)
+        .single();
 
-      // Initialize storage contract with proper error handling and complete ABI
-      if (!STORAGE_CONTRACT_ADDRESS) {
-        throw new Error('Storage contract address not configured');
+      if (currentProviderError) {
+        throw new Error('Failed to get current provider storage: ' + currentProviderError.message);
       }
 
-      // Validate storage contract address with proper checksum
-      const validStorageAddress = ethers.getAddress(STORAGE_CONTRACT_ADDRESS.toLowerCase());
+      if (!currentProviderData || currentProviderData.available_storage < storageAmount) {
+        throw new Error('Storage amount no longer available. Please try again with a smaller amount.');
+      }
+
+      // Update provider's available storage with current value
+      const { error: updateError } = await supabase
+        .from('storage_providers')
+        .update({ 
+          available_storage: currentProviderData.available_storage - storageAmount 
+        })
+        .eq('id', provider.id);
+
+      // Convert amount to token units with proper decimals
+      const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+
+      // Initialize storage contract with proper error handling and complete ABI
+      if (!STORAGE_CONTRACT_ADDRESS || typeof STORAGE_CONTRACT_ADDRESS !== 'string') {
+        throw new Error('Storage contract address is not configured or invalid. Please check your environment variables.');
+      }
+
+      // Validate and format the contract address
+      let validStorageAddress;
+      try {
+        // Clean and normalize the address
+        const cleanAddress = STORAGE_CONTRACT_ADDRESS.trim().toLowerCase();
+        if (!/^0x[a-fA-F0-9]{40}$/.test(cleanAddress)) {
+          throw new Error('Invalid address format');
+        }
+        // Ensure the address is properly formatted with checksum
+        validStorageAddress = ethers.getAddress(cleanAddress);
+      } catch (error) {
+        console.error('Invalid storage contract address:', error);
+        throw new Error('Invalid storage contract address format. Please check the configuration.');
+      }
+
+      // Verify contract existence and bytecode
+      const code = await bscProvider.getCode(validStorageAddress);
+      if (!code || code === '0x' || code === '0x0') {
+        throw new Error(`No contract found at address ${validStorageAddress}. Please verify the contract is deployed.`);
+      }
+
       const storageContractABI = [
         "function purchaseStorage(address provider, uint256 storageAmount, uint256 tokenAmount, uint256 duration) external returns (bool)",
         "event StoragePurchased(address indexed user, address indexed provider, uint256 amount)"
@@ -144,22 +220,17 @@ const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
         signer
       );
 
-      // Call purchaseStorage function with proper gas estimation and error handling
-      const duration = 30 * 24 * 60 * 60; // 30 seconds threshold
-      // Validate provider wallet address with proper checksum
-      const validProviderAddress = ethers.getAddress(provider.wallet_address.toLowerCase());
-      
-      // Get token decimals with proper error handling
-      let decimals;
-      try {
-        decimals = await tokenContract.decimals();
-      } catch (error) {
-        console.error('Failed to get token decimals:', error);
-        decimals = 18; // Default to 18 decimals if call fails
+      // Check and set token allowance if needed
+      const currentAllowance = await tokenContract.allowance(userAddress, validStorageAddress);
+      if (currentAllowance.lt(tokenAmount)) {
+        const approveTx = await tokenContract.approve(validStorageAddress, tokenAmount);
+        await approveTx.wait();
       }
 
-      // Convert amount to token units with proper decimals
-      const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+      // Call purchaseStorage function with proper gas estimation and error handling
+      const duration = 30 * 24 * 60 * 60; // 30 days in seconds
+      // Validate provider wallet address with proper checksum
+      const validProviderAddress = ethers.getAddress(provider.wallet_address);
 
       let gasLimit;
       try {
@@ -184,116 +255,30 @@ const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
         { gasLimit }
       );
 
-      // Check user's token balance and allowance with proper error handling
-      try {
-        const balance = await tokenContract.balanceOf(userAddress).catch((error) => {
-          console.error('Failed to check token balance:', error);
-          if (error.code === 'CALL_EXCEPTION') {
-            throw new Error('Failed to check token balance: Contract call failed. Please verify the contract address and try again.');
-          } else if (error.code === 'NETWORK_ERROR') {
-            throw new Error('Failed to check token balance: Network error. Please check your connection and try again.');
-          } else if (error.code === 'TIMEOUT') {
-            throw new Error('Failed to check token balance: Request timed out. Please try again.');
-          }
-          throw new Error('Failed to check token balance: ' + (error.reason || error.message || 'Unknown error'));
-        });
-
-        if (balance < tokenAmount) {
-          throw new Error(`Insufficient AAI token balance. Required: ${ethers.formatUnits(tokenAmount, decimals)} AAI`);
-        }
-
-        // Check existing allowance with proper error handling
-        const currentAllowance = await tokenContract.allowance(userAddress, validStorageAddress).catch((error) => {
-          console.error('Failed to check token allowance:', error);
-          if (error.code === 'CALL_EXCEPTION') {
-            throw new Error('Failed to check token allowance: Contract call failed. Please verify the contract address and try again.');
-          } else if (error.code === 'NETWORK_ERROR') {
-            throw new Error('Failed to check token allowance: Network error. Please check your connection and try again.');
-          } else if (error.code === 'TIMEOUT') {
-            throw new Error('Failed to check token allowance: Request timed out. Please try again.');
-          }
-          throw new Error('Failed to check token allowance: ' + (error.reason || error.message || 'Unknown error'));
-        });
-
-        if (currentAllowance < tokenAmount) {
-          // First approve the storage contract to spend tokens with proper gas estimation
-          const approveTx = await tokenContract.approve(
-            validStorageAddress,
-            tokenAmount,
-            { 
-              gasLimit: await tokenContract.approve.estimateGas(STORAGE_CONTRACT_ADDRESS, tokenAmount)
-                .catch(() => 100000) // Fallback gas limit if estimation fails
-            }
-          ).catch((error) => {
-            console.error('Token approval failed:', error);
-            throw new Error('Failed to approve token spending. Please try again.');
-          });
-
-          const approveReceipt = await approveTx.wait();
-          if (!approveReceipt.status) {
-            throw new Error('Token approval transaction failed');
-          }
-        }
-
-        // Call purchaseStorage function with proper gas estimation
-        const duration = 30 * 24 * 60 * 60; // 30 days in seconds
-        // Validate provider wallet address with proper checksum
-        const validProviderAddress = ethers.getAddress(provider.wallet_address.toLowerCase());
-        const purchaseTx = await storageContract.purchaseStorage(
-          validProviderAddress,
-          ethers.parseUnits(storageAmount.toString(), 0), // Convert to BigInt
-          tokenAmount,
-          duration,
-          { 
-            gasLimit: await storageContract.purchaseStorage.estimateGas(
-              provider.wallet_address,
-              ethers.parseUnits(storageAmount.toString(), 0),
-              tokenAmount,
-              duration
-            ).catch(() => 300000) // Fallback gas limit if estimation fails
-          }
-        );
-        const receipt = await purchaseTx.wait();
-
-        if (!receipt.status) {
-          throw new Error('Storage purchase transaction failed');
-        }
-
-        const expiryDate = new Date();
-        expiryDate.setDate(expiryDate.getDate() + 30); // Set expiry to 30 days from now
-
-        // Create storage allocation record
-        const { error: allocationError } = await supabase
-          .from('storage_allocations')
-          .insert({
-            user_address: userAddress,
-            provider_id: provider.id,
-            allocated_gb: storageAmount,
-            paid_amount: totalCost,
-            transaction_hash: purchaseTx.hash,
-            expires_at: expiryDate.toISOString()
-          });
-
-        if (allocationError) throw allocationError;
-      } catch (error: any) {
-        console.error('Token contract error:', error);
-        throw new Error(
-          error.reason || 
-          error.data?.message || 
-          error.message || 
-          'Token contract interaction failed'
-        );
+      // Wait for transaction confirmation
+      const receipt = await purchaseTx.wait();
+      if (!receipt.status) {
+        throw new Error('Storage purchase transaction failed');
       }
 
-      // Update provider's available storage
-      const { error: updateError } = await supabase
-        .from('storage_providers')
-        .update({ 
-          available_storage: providerData.available_storage - storageAmount 
-        })
-        .eq('id', provider.id);
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() + 30); // Set expiry to 30 days from now
 
-      if (updateError) throw updateError;
+      // Create storage allocation record
+      const { error: allocationError } = await supabase
+        .from('storage_allocations')
+        .insert({
+          user_address: userAddress,
+          provider_id: provider.id,
+          allocated_gb: storageAmount,
+          paid_amount: totalCost,
+          transaction_hash: purchaseTx.hash,
+          expires_at: expiryDate.toISOString()
+        });
+
+      if (allocationError) {
+        throw new Error('Failed to create allocation record: ' + allocationError.message);
+      }
 
       onPurchaseComplete();
     } catch (error: any) {
@@ -325,12 +310,12 @@ const BSC_TOKEN_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
 
         <div className="flex justify-between text-sm text-gray-600">
           <span>Price per GB:</span>
-          <span>{provider.price_per_gb} BNB</span>
+          <span>{provider.price_per_gb} AAI</span>
         </div>
 
         <div className="flex justify-between text-sm font-medium">
           <span>Total Cost:</span>
-          <span>{(storageAmount * provider.price_per_gb).toFixed(2)} BNB</span>
+          <span>{(storageAmount * provider.price_per_gb).toFixed(2)} AAI</span>
         </div>
 
         <button

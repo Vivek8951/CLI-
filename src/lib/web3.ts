@@ -13,11 +13,11 @@ export const BSC_TESTNET_CONFIG = {
   blockExplorerUrls: ['https://testnet.bscscan.com/'],
 };
 
-// Alpha AI Token Contract
-export const AAI_TOKEN_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
+// Alpha AI Token Contract (BSC Testnet)
+export const AAI_TOKEN_ADDRESS = '0x4B5C9768a58E053b4E54235c67b2C49AE86A0f7C';
 
-// Storage Contract
-export const STORAGE_CONTRACT_ADDRESS = import.meta.env.VITE_STORAGE_CONTRACT_ADDRESS;
+// Storage Contract (BSC Testnet)
+export const STORAGE_CONTRACT_ADDRESS = '0xd5F6a56c8B273854fbd135239FcbcC2B8142585a';
 
 export async function connectWallet() {
   if (!window.ethereum) {

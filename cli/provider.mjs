@@ -216,6 +216,7 @@ program.command('start')
         // Configure storage directory with platform-specific handling
         let providerStorageDir;
         try {
+          // Create base storage directory based on platform
           if (os.platform() === 'win32') {
             providerStorageDir = path.join(storageDir, 'alpha-ai-storage');
           } else {
@@ -224,13 +225,23 @@ program.command('start')
             providerStorageDir = path.join(baseDir, 'storage');
           }
           
+          // Create directory with proper permissions
           await mkdir(providerStorageDir, { recursive: true, mode: 0o755 });
           console.log(chalk.green(`✓ Storage directory created at: ${providerStorageDir}`));
           
-          // Verify write permissions
+          // Verify write permissions using platform-specific commands
           const testFile = path.join(providerStorageDir, '.write-test');
-          await mkdir(testFile, { recursive: true });
-          await execAsync(`rm ${os.platform() === 'win32' ? '-r' : '-rf'} "${testFile}"`);
+          const testDir = path.join(providerStorageDir, '.test-dir');
+          
+          // Create test directory
+          await mkdir(testDir, { recursive: true });
+          
+          // Remove test directory using platform-specific commands
+          if (os.platform() === 'win32') {
+            await execAsync(`rmdir /s /q "${testDir}"`);
+          } else {
+            await execAsync(`rm -rf "${testDir}"`);
+          }
         } catch (error) {
           console.error(chalk.red(`Failed to create or access storage directory: ${error.message}`));
           console.log(chalk.yellow('Please ensure you have proper permissions to create and write to the selected directory.'));
