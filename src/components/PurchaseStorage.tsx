@@ -31,7 +31,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
 
       // Ensure correct network
       const chainId = await (window as any).ethereum.request({ method: 'eth_chainId' });
-      if (chainId !== BSC_TESTNET_CONFIG.chainId) {
+      if (chainId !== '0x61') { // BSC Testnet chainId
         throw new Error('Please switch to BSC Testnet to continue');
       }
 
@@ -39,32 +39,53 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
       const signer = await bscProvider.getSigner();
       const userAddress = await signer.getAddress();
 
-      // Initialize token contract
-      const tokenContract = new ethers.Contract(
-        AAI_TOKEN_ADDRESS,
-        [
-          "function balanceOf(address) view returns (uint256)",
-          "function decimals() view returns (uint8)",
-          "function approve(address spender, uint256 value) returns (bool)",
-          "function allowance(address owner, address spender) view returns (uint256)"
-        ],
-        signer
-      );
+      // Initialize token contract with proper error handling
+      let tokenContract;
+      try {
+        tokenContract = new ethers.Contract(
+          AAI_TOKEN_ADDRESS,
+          [
+            "function balanceOf(address) view returns (uint256)",
+            "function decimals() view returns (uint8)",
+            "function approve(address spender, uint256 value) returns (bool)",
+            "function allowance(address owner, address spender) view returns (uint256)"
+          ],
+          signer
+        );
+
+        // Verify contract existence
+        const code = await bscProvider.getCode(AAI_TOKEN_ADDRESS);
+        if (!code || code === '0x' || code === '0x0') {
+          throw new Error('Token contract not found. Please verify the contract address.');
+        }
+      } catch (error) {
+        console.error('Token contract initialization error:', error);
+        throw new Error('Failed to initialize token contract. Please verify the contract address and network connection.');
+      }
 
       // Calculate total cost in AAI tokens
+      let decimals;
+      try {
+        decimals = await tokenContract.decimals();
+      } catch (error) {
+        console.error('Failed to get token decimals:', error);
+        throw new Error('Failed to get token information. Please verify the contract address.');
+      }
+
       const totalCost = storageAmount * provider.price_per_gb;
-      const decimals = await tokenContract.decimals();
       const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
 
-      // Check user's token balance
+      // Check user's token balance with improved error handling
       let balance;
       try {
         balance = await tokenContract.balanceOf(userAddress);
-        if (balance === undefined || balance === null) {
-          throw new Error('Failed to retrieve token balance');
+        
+        if (balance === undefined || balance === null || balance === '0x') {
+          throw new Error('Invalid balance response from contract');
         }
 
         const formattedBalance = ethers.formatUnits(balance, decimals);
+        console.log('Current balance:', formattedBalance, 'AAI');
 
         if (balance === 0n) {
           throw new Error(`No AAI tokens found in your wallet. Current balance: ${formattedBalance} AAI`);
@@ -76,9 +97,19 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         }
       } catch (error: any) {
         console.error('Balance check error:', error);
+        
         if (error.code === 'BAD_DATA' || error.message?.includes('BAD_DATA')) {
-          throw new Error('Failed to read token balance. Please ensure you are connected to BSC Testnet and try again.');
+          throw new Error('Unable to verify token balance. Please ensure you have AAI tokens and are connected to BSC Testnet.');
         }
+        
+        if (error.message?.includes('Invalid balance response')) {
+          throw new Error('Failed to read token balance. Please try again or contact support.');
+        }
+        
+        if (error.message?.includes('0x')) {
+          throw new Error('Invalid token balance format. Please ensure you are connected to BSC Testnet.');
+        }
+        
         throw error;
       }
 
