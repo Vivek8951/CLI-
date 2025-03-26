@@ -24,98 +24,73 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
     try {
       setIsLoading(true);
 
-      // Check if wallet is connected
+      // Check if wallet is connected and get provider
       if (!(window as any).ethereum) {
-        throw new Error('Please connect your wallet first');
+        throw new Error('Please install MetaMask or another Web3 wallet');
       }
 
-      // Initialize blockchain transaction with BNB Test network
-      const bscProvider = new ethers.BrowserProvider((window as any).ethereum, {
-        name: "BNB Test Network",
-        chainId: 97,
-        ensAddress: undefined // Explicitly disable ENS resolution
-      });
-      const network = await bscProvider.getNetwork();
-      
-      // Ensure we're on BNB Test network (Chain ID: 97)
-      if (network.chainId !== 97n) {
-        // Request network switch if not on BNB Test
-        try {
-          await (window as any).ethereum.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: '0x61' }] // 0x61 is hex for 97
-          });
-        } catch (switchError: any) {
-          // This error code indicates that the chain has not been added to MetaMask
-          if (switchError.code === 4902) {
-            try {
-              await (window as any).ethereum.request({
-                method: 'wallet_addEthereumChain',
-                params: [{
-                  chainId: '0x61',
-                  chainName: 'BNB Test Network',
-                  nativeCurrency: {
-                    name: 'BNB',
-                    symbol: 'tBNB',
-                    decimals: 18
-                  },
-                  rpcUrls: ['https://data-seed-prebsc-1-s1.binance.org:8545'],
-                  blockExplorerUrls: ['https://testnet.bscscan.com']
-                }]
-              });
-            } catch (addError) {
-              throw new Error('Failed to add BNB Test network to your wallet');
-            }
-          }
-          throw new Error('Please switch to BNB Test network');
-        }
+      // Ensure correct network
+      const chainId = await (window as any).ethereum.request({ method: 'eth_chainId' });
+      if (chainId !== BSC_TESTNET_CONFIG.chainId) {
+        throw new Error('Please switch to BSC Testnet to continue');
       }
-      
+
+      const bscProvider = new ethers.BrowserProvider((window as any).ethereum);
       const signer = await bscProvider.getSigner();
       const userAddress = await signer.getAddress();
 
-      // Initialize token contract with signer and proper ABI
+      // Initialize token contract
       const tokenContract = new ethers.Contract(
         AAI_TOKEN_ADDRESS,
         [
-          "function approve(address spender, uint256 value) returns (bool)",
-          "function balanceOf(address account) view returns (uint256)",
-          "function transfer(address to, uint256 value) returns (bool)",
+          "function balanceOf(address) view returns (uint256)",
           "function decimals() view returns (uint8)",
-          "function allowance(address owner, address spender) view returns (uint256)",
-          "event Transfer(address indexed from, address indexed to, uint256 indexed value)",
-          "event Approval(address indexed owner, address indexed spender, uint256 indexed value)"
+          "function approve(address spender, uint256 value) returns (bool)",
+          "function allowance(address owner, address spender) view returns (uint256)"
         ],
         signer
       );
 
       // Calculate total cost in AAI tokens
       const totalCost = storageAmount * provider.price_per_gb;
-      const decimals = 18; // ALPHA AI (AAI) token uses 18 decimals
+      const decimals = await tokenContract.decimals();
       const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
 
       // Check user's token balance
-      const userBalance = await tokenContract.balanceOf(userAddress);
-      const formattedBalance = ethers.formatUnits(userBalance, decimals);
+      let balance;
+      try {
+        balance = await tokenContract.balanceOf(userAddress);
+        if (balance === undefined || balance === null) {
+          throw new Error('Failed to retrieve token balance');
+        }
 
-      if (userBalance.toString() === '0') {
-        throw new Error(`No AAI tokens found in your wallet. Please acquire some tokens first. Current balance: ${formattedBalance} AAI`);
-      }
+        const formattedBalance = ethers.formatUnits(balance, decimals);
 
-      if (userBalance < tokenAmount) {
-        const formattedRequired = ethers.formatUnits(tokenAmount, decimals);
-        throw new Error(`Insufficient AAI tokens. You have ${formattedBalance} AAI but need ${formattedRequired} AAI`);
+        if (balance === 0n) {
+          throw new Error(`No AAI tokens found in your wallet. Current balance: ${formattedBalance} AAI`);
+        }
+
+        if (balance < tokenAmount) {
+          const formattedRequired = ethers.formatUnits(tokenAmount, decimals);
+          throw new Error(`Insufficient AAI tokens. You have ${formattedBalance} AAI but need ${formattedRequired} AAI`);
+        }
+      } catch (error: any) {
+        console.error('Balance check error:', error);
+        if (error.code === 'BAD_DATA' || error.message?.includes('BAD_DATA')) {
+          throw new Error('Failed to read token balance. Please ensure you are connected to BSC Testnet and try again.');
+        }
+        throw error;
       }
 
       // Request token approval from user
-      const currentAllowance = await tokenContract.allowance(userAddress, STORAGE_CONTRACT_ADDRESS);
+      const initialAllowance = await tokenContract.allowance(userAddress, STORAGE_CONTRACT_ADDRESS);
       
-      if (currentAllowance < tokenAmount) {
+      if (initialAllowance < tokenAmount) {
         try {
           const approveTx = await tokenContract.approve(STORAGE_CONTRACT_ADDRESS, tokenAmount);
           await approveTx.wait();
-        } catch (approveError) {
-          if (approveError.code === 'ACTION_REJECTED') {
+        } catch (error: unknown) {
+          if (error instanceof Error && 'code' in error && error.code === 'ACTION_REJECTED') {
             throw new Error('You rejected the token approval. Please approve to continue.');
           }
           throw new Error('Failed to approve token spending. Please try again.');
@@ -272,7 +247,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
       onPurchaseComplete();
     } catch (error) {
       console.error('Purchase failed:', error);
-      alert(error.message || 'Failed to purchase storage. Please try again.');
+      alert(error instanceof Error ? error.message : 'Failed to purchase storage. Please try again.');
     } finally {
       setIsLoading(false);
     }
