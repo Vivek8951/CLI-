@@ -33,7 +33,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
       const bscProvider = new ethers.BrowserProvider((window as any).ethereum, {
         name: "BNB Test Network",
         chainId: 97,
-        ensAddress: null // Explicitly disable ENS resolution
+        ensAddress: undefined // Explicitly disable ENS resolution
       });
       const network = await bscProvider.getNetwork();
       
@@ -89,41 +89,37 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         signer
       );
 
-      // Calculate total cost in AAI tokens first
+      // Calculate total cost in AAI tokens
       const totalCost = storageAmount * provider.price_per_gb;
-
-      // Set token decimals directly since we know it's 18
       const decimals = 18; // ALPHA AI (AAI) token uses 18 decimals
-      
-      // Check user's token balance with proper error handling
-      let userBalance;
-      try {
-        // Get user's token balance
-        userBalance = await tokenContract.balanceOf(userAddress);
-        const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
-        const formattedBalance = ethers.formatUnits(userBalance, decimals);
+      const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+
+      // Check user's token balance
+      const userBalance = await tokenContract.balanceOf(userAddress);
+      const formattedBalance = ethers.formatUnits(userBalance, decimals);
+
+      if (userBalance.toString() === '0') {
+        throw new Error(`No AAI tokens found in your wallet. Please acquire some tokens first. Current balance: ${formattedBalance} AAI`);
+      }
+
+      if (userBalance < tokenAmount) {
         const formattedRequired = ethers.formatUnits(tokenAmount, decimals);
-        
-        console.log(`User balance: ${formattedBalance} AAI`);
-        console.log(`Required amount: ${formattedRequired} AAI`);
-        
-        if (BigInt(userBalance) < BigInt(tokenAmount)) {
-          throw new Error(`Insufficient AAI token balance. You have ${formattedBalance} AAI but need ${formattedRequired} AAI`);
+        throw new Error(`Insufficient AAI tokens. You have ${formattedBalance} AAI but need ${formattedRequired} AAI`);
+      }
+
+      // Request token approval from user
+      const currentAllowance = await tokenContract.allowance(userAddress, STORAGE_CONTRACT_ADDRESS);
+      
+      if (currentAllowance < tokenAmount) {
+        try {
+          const approveTx = await tokenContract.approve(STORAGE_CONTRACT_ADDRESS, tokenAmount);
+          await approveTx.wait();
+        } catch (approveError) {
+          if (approveError.code === 'ACTION_REJECTED') {
+            throw new Error('You rejected the token approval. Please approve to continue.');
+          }
+          throw new Error('Failed to approve token spending. Please try again.');
         }
-      } catch (error: any) {
-        console.error('Token balance check failed:', error);
-        if (error.message.includes('Insufficient')) {
-          throw error;
-        }
-        // Check if it's a contract interaction error
-        if (error.code === 'CALL_EXCEPTION') {
-          throw new Error('Failed to interact with the AAI token contract. Please ensure you are connected to the correct network.');
-        }
-        // Check if it's a user rejection error
-        if (error.code === 4001) {
-          throw new Error('Transaction was rejected. Please try again.');
-        }
-        throw new Error('Failed to verify token balance. Please check your wallet connection and try again.');
       }
 
       // Check if provider is active and has IPFS node
@@ -180,33 +176,31 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         })
         .eq('id', provider.id);
 
-      // Convert amount to token units with proper decimals
-      const tokenAmount = ethers.parseUnits(totalCost.toString(), decimals);
+      if (updateError) {
+        throw new Error('Failed to update provider storage: ' + updateError.message);
+      }
 
       // Initialize storage contract with proper error handling and complete ABI
       if (!STORAGE_CONTRACT_ADDRESS || typeof STORAGE_CONTRACT_ADDRESS !== 'string') {
-        throw new Error('Storage contract address is not configured or invalid. Please check your environment variables.');
+        throw new Error('Storage contract address is not configured or invalid.');
       }
 
       // Validate and format the contract address
       let validStorageAddress;
       try {
-        // Clean and normalize the address
         const cleanAddress = STORAGE_CONTRACT_ADDRESS.trim().toLowerCase();
         if (!/^0x[a-fA-F0-9]{40}$/.test(cleanAddress)) {
           throw new Error('Invalid address format');
         }
-        // Ensure the address is properly formatted with checksum
         validStorageAddress = ethers.getAddress(cleanAddress);
       } catch (error) {
-        console.error('Invalid storage contract address:', error);
-        throw new Error('Invalid storage contract address format. Please check the configuration.');
+        throw new Error('Invalid storage contract address format.');
       }
 
       // Verify contract existence and bytecode
       const code = await bscProvider.getCode(validStorageAddress);
       if (!code || code === '0x' || code === '0x0') {
-        throw new Error(`No contract found at address ${validStorageAddress}. Please verify the contract is deployed.`);
+        throw new Error(`No contract found at address ${validStorageAddress}`);
       }
 
       const storageContractABI = [
@@ -222,14 +216,13 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
 
       // Check and set token allowance if needed
       const currentAllowance = await tokenContract.allowance(userAddress, validStorageAddress);
-      if (currentAllowance.lt(tokenAmount)) {
+      if (currentAllowance < tokenAmount) {
         const approveTx = await tokenContract.approve(validStorageAddress, tokenAmount);
         await approveTx.wait();
       }
 
-      // Call purchaseStorage function with proper gas estimation and error handling
+      // Call purchaseStorage function with proper gas estimation
       const duration = 30 * 24 * 60 * 60; // 30 days in seconds
-      // Validate provider wallet address with proper checksum
       const validProviderAddress = ethers.getAddress(provider.wallet_address);
 
       let gasLimit;
@@ -240,10 +233,8 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
           tokenAmount,
           duration
         );
-        // Add 20% buffer to estimated gas
-        gasLimit = Math.floor(Number(gasLimit) * 1.2);
+        gasLimit = Math.floor(Number(gasLimit) * 1.2); // Add 20% buffer
       } catch (error) {
-        console.error('Gas estimation failed:', error);
         gasLimit = 300000; // Fallback gas limit
       }
 
@@ -255,16 +246,14 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
         { gasLimit }
       );
 
-      // Wait for transaction confirmation
       const receipt = await purchaseTx.wait();
       if (!receipt.status) {
         throw new Error('Storage purchase transaction failed');
       }
 
       const expiryDate = new Date();
-      expiryDate.setDate(expiryDate.getDate() + 30); // Set expiry to 30 days from now
+      expiryDate.setDate(expiryDate.getDate() + 30);
 
-      // Create storage allocation record
       const { error: allocationError } = await supabase
         .from('storage_allocations')
         .insert({
@@ -281,7 +270,7 @@ export default function PurchaseStorage({ provider, onPurchaseComplete }: Purcha
       }
 
       onPurchaseComplete();
-    } catch (error: any) {
+    } catch (error) {
       console.error('Purchase failed:', error);
       alert(error.message || 'Failed to purchase storage. Please try again.');
     } finally {

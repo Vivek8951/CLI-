@@ -96,6 +96,24 @@ export function WalletProvider({ children }: WalletProviderProps) {
           method: 'wallet_switchEthereumChain',
           params: [{ chainId: '0x61' }]
         });
+
+        // Add Alpha AI token to wallet
+        try {
+          await window.ethereum.request({
+            method: 'wallet_watchAsset',
+            params: {
+              type: 'ERC20',
+              options: {
+                address: '0x1234567890123456789012345678901234567890', // Replace with actual token contract address
+                symbol: 'ALPHA',
+                decimals: 18,
+                image: 'https://your-token-logo-url.com/logo.png' // Replace with actual logo URL
+              }
+            }
+          });
+        } catch (tokenError) {
+          console.error('Failed to add token:', tokenError);
+        }
       } catch (switchError: any) {
         if (switchError.code === 4902) {
           await window.ethereum.request({
